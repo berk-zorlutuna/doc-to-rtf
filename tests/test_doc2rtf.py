@@ -1,6 +1,7 @@
 import subprocess
 import sys
 from pathlib import Path
+from unittest import mock
 
 import pytest
 from docx import Document
@@ -82,3 +83,16 @@ def test_cli_folder_recursive(tmp_path):
     rc = doc2rtf.main([str(tmp_path / "in"), "-r", "-o", str(tmp_path / "out")])
     assert rc == 0
     assert sorted(p.name for p in (tmp_path / "out").iterdir()) == ["one.rtf", "two.rtf"]
+
+
+def test_no_arguments_opens_gui():
+    with mock.patch("doc2rtf.run_gui", return_value=0) as gui:
+        assert doc2rtf.main([]) == 0
+        assert doc2rtf.main(["--gui"]) == 0
+    assert gui.call_count == 2
+
+
+def test_gui_without_tkinter_fails_cleanly(capsys):
+    with mock.patch("doc2rtf.tk", None):
+        assert doc2rtf.run_gui() == 1
+    assert "Tkinter is not available" in capsys.readouterr().err

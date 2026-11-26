@@ -16,7 +16,7 @@ python doc2rtf.py my_docs --no-overwrite      # skip existing .rtf files
 
 ### Graphical interface
 ```bash
-python doc2rtf_gui.py
+python doc2rtf.py          # no arguments (or --gui) opens the window
 ```
 Click **Browse...**, pick a `.doc` or `.docx` file, then click **Convert to RTF**.
 The RTF is saved in the same folder with the same name (`report.docx` -> `report.rtf`).
