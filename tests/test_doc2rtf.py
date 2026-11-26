@@ -1,5 +1,6 @@
 import subprocess
 import sys
+import time
 from pathlib import Path
 from unittest import mock
 
@@ -96,3 +97,47 @@ def test_gui_without_tkinter_fails_cleanly(capsys):
     with mock.patch("doc2rtf.tk", None):
         assert doc2rtf.run_gui() == 1
     assert "Tkinter is not available" in capsys.readouterr().err
+
+
+def _fake_soffice(tmp_path, monkeypatch, body: str) -> Path:
+    script = tmp_path / "fake_soffice.sh"
+    script.write_text("#!/bin/sh\n" + body)
+    script.chmod(0o755)
+    monkeypatch.setenv("SOFFICE_PATH", str(script))
+    return script
+
+
+def _running(marker: str) -> bool:
+    out = subprocess.run(["pgrep", "-f", marker], capture_output=True, text=True)
+    return bool(out.stdout.strip())
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uses a shell-script fake LibreOffice")
+def test_timeout_kills_libreoffice_and_its_children(tmp_path, monkeypatch):
+    # Like soffice.exe -> soffice.bin on Windows: a launcher whose child hangs.
+    marker = "sleep 297.5"  # unusual duration so pgrep finds only our child
+    _fake_soffice(tmp_path, monkeypatch, f"{marker} &\nsleep 300\n")
+    src = make_docx(tmp_path / "2.docx", "x")
+    start = time.monotonic()
+    with pytest.raises(doc2rtf.ConversionError, match="did not finish within 2 seconds"):
+        doc2rtf.convert_file(src, timeout=2)
+    assert time.monotonic() - start < 15
+    time.sleep(0.5)
+    assert not _running(marker), "the hung child process was left running"
+    assert not (tmp_path / "2.rtf").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uses a shell-script fake LibreOffice")
+def test_libreoffice_error_output_is_reported(tmp_path, monkeypatch):
+    _fake_soffice(tmp_path, monkeypatch, 'echo "Error: source file could not be loaded" >&2\nexit 1\n')
+    src = make_docx(tmp_path / "a.docx", "x")
+    with pytest.raises(doc2rtf.ConversionError, match="exit code 1.*could not be loaded"):
+        doc2rtf.convert_file(src)
+
+
+def test_cli_reports_timeout_and_returns_error(tmp_path, monkeypatch):
+    def boom(*a, **k):
+        raise doc2rtf.ConversionError("Timed out converting x")
+    monkeypatch.setattr(doc2rtf, "convert_file", boom)
+    src = make_docx(tmp_path / "a.docx", "x")
+    assert doc2rtf.main([str(src)]) == 1

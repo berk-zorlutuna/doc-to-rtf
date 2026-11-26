@@ -14,6 +14,7 @@ import gc
 import os
 import queue
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -55,6 +56,55 @@ def find_soffice() -> str:
     )
 
 
+def _run_soffice(cmd: list[str], log_path: Path, timeout: int, src: Path) -> int:
+    """Run LibreOffice and return its exit code; kill all of it on timeout."""
+    kwargs: dict = {}
+    if os.name == "nt":
+        # On Windows soffice.exe is a launcher that starts soffice.bin, which does
+        # the work. Its own process group lets us kill both; CREATE_NO_WINDOW
+        # stops a console window from flashing up when run from the GUI.
+        kwargs["creationflags"] = (subprocess.CREATE_NEW_PROCESS_GROUP
+                                   | subprocess.CREATE_NO_WINDOW)
+    else:
+        kwargs["start_new_session"] = True  # own process group, killed as a whole
+    # Output goes to a file, not a pipe: a pipe kept open by a leftover
+    # soffice.bin would make us wait even after the launcher has exited.
+    with open(log_path, "wb") as log:
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=log,
+                                stderr=subprocess.STDOUT, **kwargs)
+        try:
+            return proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill_process_tree(proc)
+            raise ConversionError(
+                f"Timed out converting {src}: LibreOffice did not finish within "
+                f"{timeout} seconds and was stopped.\n\n"
+                "Possible causes: the document is password-protected or shows a "
+                "prompt when opened (try opening it in LibreOffice Writer), it is "
+                "very large (use --timeout on the command line), or LibreOffice "
+                f"itself does not start properly ({cmd[0]}).") from None
+
+
+def _kill_process_tree(proc: subprocess.Popen) -> None:
+    """Stop LibreOffice together with every process it started."""
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                           capture_output=True, timeout=30)
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 def convert_file(src: str | Path, out_dir: str | Path | None = None,
                  overwrite: bool = True, timeout: int = 120) -> Path:
     """Convert one .doc/.docx file to .rtf and return the output path."""
@@ -71,26 +121,28 @@ def convert_file(src: str | Path, out_dir: str | Path | None = None,
         raise ConversionError(f"Output already exists (use --overwrite): {target}")
 
     soffice = find_soffice()
-    # A private profile dir lets several conversions run at once and avoids
-    # clashing with a LibreOffice instance the user may already have open.
-    with tempfile.TemporaryDirectory(prefix="doc2rtf_") as tmp:
+    # A private profile dir avoids clashing with a LibreOffice instance the
+    # user may already have open. ignore_cleanup_errors: on Windows a killed
+    # LibreOffice can briefly keep files locked, which must not hide the real error.
+    with tempfile.TemporaryDirectory(prefix="doc2rtf_", ignore_cleanup_errors=True) as tmp:
         profile = Path(tmp, "profile").as_uri()
         work_out = Path(tmp, "out")
         work_out.mkdir()
+        log_path = Path(tmp, "soffice.log")
         cmd = [
             soffice, f"-env:UserInstallation={profile}",
-            "--headless", "--norestore", "--nolockcheck",
+            "--headless", "--invisible", "--nodefault", "--nologo",
+            "--norestore", "--nolockcheck",
             "--convert-to", "rtf", "--outdir", str(work_out), str(src),
         ]
-        try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        except subprocess.TimeoutExpired as exc:
-            raise ConversionError(f"Timed out converting {src}") from exc
+        returncode = _run_soffice(cmd, log_path, timeout, src)
 
         produced = work_out / (src.stem + ".rtf")
-        if proc.returncode != 0 or not produced.is_file():
-            detail = (proc.stderr or proc.stdout).strip()
-            raise ConversionError(f"LibreOffice failed to convert {src}: {detail}")
+        if returncode != 0 or not produced.is_file():
+            detail = log_path.read_text(errors="replace").strip() if log_path.exists() else ""
+            raise ConversionError(
+                f"LibreOffice failed to convert {src} (exit code {returncode})"
+                + (f": {detail}" if detail else "."))
         shutil.move(str(produced), str(target))
     return target
 

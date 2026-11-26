@@ -3,7 +3,7 @@
 Convert Microsoft Word `.doc` and `.docx` files to `.rtf` with Python, using LibreOffice in headless mode (keeps formatting, tables and images).
 
 ## Requirements
-- Python 3.9+
+- Python 3.10+
 - [LibreOffice](https://www.libreoffice.org/) installed (`soffice` on PATH, or set `SOFFICE_PATH`)
 
 ## Usage
